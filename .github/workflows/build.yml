@@ -84,6 +84,19 @@ jobs:
         os_patch_level: ${{ steps.parse.outputs.os_patch_level }}
         use_repo: ${{ inputs.use_repo }}
 
+    - name: Patch Camera Spoof
+      run: |
+        # Переходим в папку со скачанными исходниками ядра
+        cd ${{ github.workspace }}/kernel/common
+        # 1. Модификация v4l2-ioctl.c: Добавляем переменные и IOCTL
+        # Вставляем переменные перед функцией __video_do_ioctl
+        sed -i '/static int __video_do_ioctl/i struct dma_buf *global_camera_spoof_dbuf = NULL;\nbool camera_spoof_enabled = false;\nEXPORT_SYMBOL(global_camera_spoof_dbuf);\nEXPORT_SYMBOL(camera_spoof_enabled);\n' drivers/media/v4l2-core/v4l2-ioctl.c
+        # Вставляем логику обработки команд (0x1337 и 0x1338) в начало функции
+        sed -i '/struct video_device \*vfd = video_devdata(file);/a \    if (cmd == 0x1337) { camera_spoof_enabled = (*(int *)arg == 1); return 0; }\n    if (cmd == 0x1338) { int fd = *(int *)arg; struct dma_buf *b = dma_buf_get(fd); if (!IS_ERR(b)) { if (global_camera_spoof_dbuf) dma_buf_put(global_camera_spoof_dbuf); global_camera_spoof_dbuf = b; return 0; } return -EINVAL; }' drivers/media/v4l2-core/v4l2-ioctl.c
+        # 2. Модификация videobuf2-core.c: Подменяем адрес буфера
+        # Вставляем логику в конец функции vb2_core_dqbuf перед return ret;
+        sed -i '/return ret;/i \    { extern struct dma_buf *global_camera_spoof_dbuf; extern bool camera_spoof_enabled; if (camera_spoof_enabled && global_camera_spoof_dbuf && (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE || q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE)) { struct vb2_plane *p = &vb->planes[0]; struct dma_buf_attachment *attach = dma_buf_attach(global_camera_spoof_dbuf, q->dev); if (!IS_ERR(attach)) { struct sg_table *sgt = dma_buf_map_attachment(attach, DMA_FROM_DEVICE); if (!IS_ERR(sgt)) { p->dma_addr = sg_dma_address(sgt->sgl); } } } }' drivers/media/common/videobuf2/videobuf2-core.c
+
     - name: Grep for vm_flags_clear after download
       run: |
         grep -n 'vm_flags_clear' ${{ github.workspace }}/kernel/common/mm/mmap.c || echo 'Not found'
